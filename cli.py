@@ -59,10 +59,10 @@ def download_single(
     print(f"\n{'='*60}")
     print(f"下载: {url}")
 
-    # 去重检查
+    # 去重检查（纯内存操作，无需网络）
     if not force and dedup.is_url_downloaded(url):
         print(f"  ⏭ 已下载过，跳过（使用 --force 强制重新下载）")
-        return False
+        return None  # None = skip，无需等待
 
     page = browser_mgr.new_page()
     try:
@@ -188,7 +188,8 @@ def cmd_download(args):
             browser_mgr=browser_mgr,
             force=args.force,
         )
-        sys.exit(0 if success else 1)
+        # None=跳过(不算失败), True=成功, False=失败
+        sys.exit(0 if success is not False else 1)
     finally:
         browser_mgr.close()
 
@@ -235,17 +236,20 @@ def cmd_batch(args):
                 browser_mgr=browser_mgr,
                 force=args.force,
             )
-            if ok:
-                success_count += 1
-            elif dedup.is_url_downloaded(normalize_baike_url(kw)):
+            if ok is None:
+                # 跳过（已下载过）
                 skip_count += 1
+                # 跳过不需要等待，继续下一条
+            elif ok:
+                success_count += 1
+                if i < len(keywords):
+                    print(f"  等待 {config.REQUEST_INTERVAL}s ...")
+                    time.sleep(config.REQUEST_INTERVAL)
             else:
                 fail_count += 1
-
-            # 下载间隔
-            if i < len(keywords):
-                print(f"  等待 {config.REQUEST_INTERVAL}s ...")
-                time.sleep(config.REQUEST_INTERVAL)
+                if i < len(keywords):
+                    print(f"  等待 {config.REQUEST_INTERVAL}s ...")
+                    time.sleep(config.REQUEST_INTERVAL)
 
         print(f"\n{'='*60}")
         print(f"批量下载完成:")
