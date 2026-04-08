@@ -13,19 +13,43 @@ import config
 from scraper.baike_parser import BaikeDocument
 
 
+def _local_to_file_url(local_path: str) -> str:
+    """将本地文件路径转换为 file:// URL"""
+    return "file://" + local_path
+
+
+def _img_to_data_uri(local_path: str) -> str:
+    """将本地图片转换为 base64 data URI（确保 PDF 中图片正常显示）"""
+    import base64
+    try:
+        with open(local_path, "rb") as f:
+            data = base64.b64encode(f.read()).decode()
+        ext = Path(local_path).suffix.lower()[1:]
+        mime = {"jpg": "jpeg", "jpeg": "jpeg", "png": "png", "gif": "gif", "webp": "webp"}.get(ext, "jpeg")
+        return f"data:image/{mime};base64,{data}"
+    except Exception:
+        return ""
+
+
 def build_pdf_html(doc: BaikeDocument, url_to_path: dict[str, str]) -> str:
     """
     将 BaikeDocument 渲染为可打印的 HTML
     """
     from bs4 import BeautifulSoup
 
-    # 替换图片路径
+    # 替换图片路径为 file:// URL（Playwright PDF 渲染器可访问本地文件）
     html_content = doc.html_content
     soup = BeautifulSoup(html_content, "lxml")
     for img in soup.find_all("img"):
         src = img.get("data-src") or img.get("src")
         if src and src in url_to_path:
-            img["src"] = url_to_path[src]
+            local = url_to_path[src]
+            # 优先用 base64 内嵌（最可靠），其次用 file:// URL
+            data_uri = _img_to_data_uri(local)
+            if data_uri:
+                img["src"] = data_uri
+            else:
+                img["src"] = _local_to_file_url(local)
 
     # 构建基本信息表格 HTML
     basic_info_html = ""
@@ -42,12 +66,17 @@ def build_pdf_html(doc: BaikeDocument, url_to_path: dict[str, str]) -> str:
     # 构建章节 HTML
     sections_html = ""
     for section in doc.sections:
-        # 替换章节中的图片
-        sec_soup = BeautifulSoup(section.content_html or "", "lxml")
+        # 替换章节中的图片为 base64 data URI
+        sec_soup = BeautifulSoup(section.content_html or "", "html.parser")
         for img in sec_soup.find_all("img"):
             src = img.get("data-src") or img.get("src")
             if src and src in url_to_path:
-                img["src"] = url_to_path[src]
+                local = url_to_path[src]
+                data_uri = _img_to_data_uri(local)
+                if data_uri:
+                    img["src"] = data_uri
+                else:
+                    img["src"] = _local_to_file_url(local)
 
         sections_html += f"""
         <div class="section">

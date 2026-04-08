@@ -202,10 +202,13 @@ class DOCXConverter:
             add_heading(document, section.title, level=section.level)
 
             # 解析章节 HTML，处理文字和图片
+            # section.content_html 是 _clean_html 输出的 body 内容字符串
             from bs4 import BeautifulSoup
-            soup = BeautifulSoup(section.content_html or "", "lxml")
+            soup = BeautifulSoup(section.content_html or "", "html.parser")
+            # _clean_html 返回 <body>...</body>，需要用 soup.body 作为根
+            root = soup.body if soup.body else soup
 
-            for child in soup.children:
+            for child in root.children:
                 if not hasattr(child, "name") or child.name is None:
                     continue
                 tag_name = child.name.lower()

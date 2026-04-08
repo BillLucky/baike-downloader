@@ -90,10 +90,14 @@ def _get_inline_text(tag: Tag) -> str:
 
 
 def _clean_html(html: str) -> str:
-    """清理 HTML，移除脚本等"""
+    """清理 HTML，移除脚本等，返回 body 内部内容（避免 html/body wrapper）"""
     soup = BeautifulSoup(html, "lxml")
     for tag in soup.find_all(["script", "style", "iframe", "noscript"]):
         tag.decompose()
+    # 提取 body 内容避免 html/body wrapper
+    body = soup.find("body")
+    if body:
+        return str(body)
     return str(soup)
 
 
@@ -193,11 +197,13 @@ class BaikeParser:
 
         页面结构：
           div.J-lemma-content
-            div.J-pgc-content        # 子内容
-            div.paraTitle_ag9fe.level-1  # h2 章节标题
-            div.para_z4tCL           # 段落
-            div.paraTitle_ag9fe.level-2  # h3 子章节标题
-            div.para_z4tCL           # 段落
+            div.paraTitle_ag9fe.level-1  # 大节标题
+            div.paraTitle_ag9fe.level-2    # 子节标题
+            div.para_z4tCL                 # 正文段落
+
+        策略：每个标题都是独立 section
+        - level-1: 收集直到下一个 level-1 标题的所有内容（包含 level-2 标题作为嵌入标题）
+        - level-2: 收集直属内容（下一个同级或更高优先级标题前）
         """
         sections = []
         content = (
@@ -208,63 +214,76 @@ class BaikeParser:
         if not content:
             return sections
 
-        current_section: Optional[Section] = None
-        current_tags: list[Tag] = []
+        children = list(content.children)
 
-        def flush_section():
-            nonlocal current_section, current_tags
-            if current_section is not None:
-                current_section.content_html = _clean_html(
-                    "".join(str(t) for t in current_tags)
-                )
-                current_section.text = _get_inline_text(
-                    BeautifulSoup(current_section.content_html, "lxml")
-                )
-                current_section.images = _extract_images_from_tag(
-                    BeautifulSoup(current_section.content_html, "lxml")
-                )
-                sections.append(current_section)
-                current_section = None
-                current_tags = []
+        def get_level(tag: Tag) -> int:
+            cls = tag.get("class", [])
+            return _class_level(cls)
 
-        for child in content.children:
-            if not isinstance(child, Tag):
+        def get_title(tag: Tag) -> str:
+            heading_tag = tag.find(["h1", "h2", "h3", "h4"], recursive=False)
+            if not heading_tag:
+                heading_tag = tag.find(["h1", "h2", "h3", "h4"])
+            title = heading_tag.get_text(strip=True) if heading_tag else tag.get_text(strip=True)
+            title = re.sub(r'\s*播报\s*$', '', title)
+            title = re.sub(r'\s+', ' ', title)
+            title = re.sub(r'\[.*?\]', '', title).strip()
+            return title
+
+        def make_section(title: str, level: int, content_tags: list[Tag]) -> Section:
+            raw_html = "".join(str(t) for t in content_tags)
+            cleaned = _clean_html(raw_html)
+            soup = BeautifulSoup(cleaned, "html.parser")
+            return Section(
+                level=level,
+                title=title,
+                content_html=cleaned,
+                text=_get_inline_text(soup),
+                images=_extract_images_from_tag(soup),
+            )
+
+        i = 0
+        while i < len(children):
+            child = children[i]
+            if not isinstance(child, Tag) or "paraTitle_ag9fe" not in child.get("class", []):
+                i += 1
                 continue
 
-            cls = child.get("class", [])
+            level = get_level(child)
+            title = get_title(child)
 
-            # 章节标题 div
-            if "paraTitle_ag9fe" in cls:
-                # 保存上一节
-                flush_section()
+            # level-1: 收集直到下一个 level-1 之前的所有内容
+            # level-2+: 收集直到下一个同级或更高优先级之前的内容
+            content_tags: list[Tag] = []
+            j = i + 1
+            while j < len(children):
+                next_child = children[j]
+                if not isinstance(next_child, Tag):
+                    j += 1
+                    continue
+                next_cls = next_child.get("class", [])
+                if "paraTitle_ag9fe" in next_cls:
+                    next_level = get_level(next_child)
+                    if level == 1:
+                        # level-1: 遇到下一个 level-1 就停止（不收集）
+                        if next_level == 1:
+                            break
+                    else:
+                        # level-2+: 遇到同级或更高优先级就停止
+                        if next_level <= level:
+                            break
+                if next_child.get_text(strip=True):
+                    content_tags.append(next_child)
+                j += 1
 
-                # 提取标题：找嵌套的 h2/h3/h4
-                heading_tag = child.find(["h1", "h2", "h3", "h4"], recursive=False)
-                if not heading_tag:
-                    heading_tag = child.find(["h1", "h2", "h3", "h4"])
-                title = heading_tag.get_text(strip=True) if heading_tag else child.get_text(strip=True)
-                # 清理"播报"等后缀
-                title = re.sub(r'\s*播报\s*$', '', title)
-                title = re.sub(r'\s+', ' ', title)
-                title = re.sub(r'\[.*?\]', '', title).strip()
+            # 对于 level-2 及以下：内容可能包含其他子标题（level-3），直接保留原样
+            # 这样 level-1 section 的 content_html 会包含子章节标题
+            section = make_section(title, level, content_tags)
+            # 过滤掉纯子标题的空 section（level-2+ 但几乎没有正文）
+            if section.text.strip() or level == 1:
+                sections.append(section)
+            i = j
 
-                level = _class_level(cls)
-
-                current_section = Section(
-                    level=level,
-                    title=title,
-                    content_html="",
-                    text="",
-                    images=[],
-                )
-                continue
-
-            # 段落 div 或其他内容标签
-            if child.get_text(strip=True):
-                current_tags.append(child)
-
-        # 保存最后一节
-        flush_section()
         return sections
 
     def _extract_all_images(self) -> list[ImageItem]:
